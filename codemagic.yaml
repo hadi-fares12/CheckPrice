@@ -19,4 +19,4 @@ workflows:
     publishing:
       email:
         recipients:
-          - $CM_EMAIL
+          - hadi12hfh@gmail.com
