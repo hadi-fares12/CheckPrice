@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'dart:io' as io;
 import 'package:path/path.dart' as path;
+import 'package:shared_preferences/shared_preferences.dart';
 
 class CreateInvoicePage extends StatefulWidget {
   @override
@@ -32,6 +33,7 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
   void initState() {
     super.initState();
     _invoiceNameController.text = 'Invoice_${DateTime.now().millisecondsSinceEpoch}';
+    _loadSavedExportColumns();
   }
 
   @override
@@ -40,15 +42,35 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
     _initializeAvailableColumns();
   }
 
+  // Load saved export columns from SharedPreferences
+  void _loadSavedExportColumns() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedColumns = prefs.getStringList('export_columns');
+    if (savedColumns != null && savedColumns.isNotEmpty) {
+      setState(() {
+        _selectedExportColumns = Set.from(savedColumns);
+      });
+    }
+  }
+
+  // Save export columns to SharedPreferences
+  void _saveExportColumns() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList('export_columns', _selectedExportColumns.toList());
+  }
+
   void _initializeAvailableColumns() {
     final provider = Provider.of<DataProvider>(context, listen: false);
     if (provider.columns.isNotEmpty) {
       setState(() {
         _availableColumns = List.from(provider.columns);
-        // Select ALL columns by default
-        _selectedExportColumns = Set.from(_availableColumns);
-        // Always include quantity
-        _selectedExportColumns.add('qty');
+        // If no columns are saved, select ALL columns by default
+        if (_selectedExportColumns.isEmpty) {
+          _selectedExportColumns = Set.from(_availableColumns);
+          // Always include quantity
+          _selectedExportColumns.add('qty');
+          _saveExportColumns(); // Save the default selection
+        }
       });
     }
   }
@@ -151,6 +173,7 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
               ),
               ElevatedButton(
                 onPressed: () {
+                  _saveExportColumns(); // Save the selection
                   Navigator.of(context).pop();
                   setState(() {});
                 },
@@ -252,6 +275,7 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
             onPressed: () {
               _addSingleItemToInvoice(item);
               Navigator.of(context).pop();
+              _clearSearch(); // Clear search after adding
             },
             child: Text('Add to Invoice'),
           ),
@@ -301,6 +325,8 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
       _foundRows.clear();
     });
 
+    _clearSearch(); // Clear search after adding
+
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('${_selectedIndices.length} items added to invoice')),
     );
@@ -336,6 +362,15 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
         _invoiceItems.add(invoiceItem);
       });
     }
+  }
+
+  // Clear search results and search field
+  void _clearSearch() {
+    setState(() {
+      _foundRows.clear();
+      _searchController.clear();
+      _selectedIndices.clear();
+    });
   }
 
   String _getItemKey(Map<String, dynamic> item) {
@@ -440,6 +475,7 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
       _selectedIndices.clear();
       _multiSelectMode = false;
       _invoiceNameController.text = 'Invoice_${DateTime.now().millisecondsSinceEpoch}';
+      _clearSearch(); // Also clear search when clearing invoice
     });
   }
 
@@ -568,9 +604,7 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
                             if (value != null) {
                               provider.selectDataset(value);
                               setState(() {
-                                _foundRows.clear();
-                                _selectedItem = null;
-                                _selectedIndices.clear();
+                                _clearSearch(); // Clear search when dataset changes
                                 _initializeAvailableColumns();
                               });
                             }
@@ -682,6 +716,13 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
                             children: [
                               Text('Search Results (${_foundRows.length} found)', 
                                 style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                              Spacer(),
+                              // Add a clear search button
+                              IconButton(
+                                icon: Icon(Icons.clear, color: Colors.red),
+                                onPressed: _clearSearch,
+                                tooltip: 'Clear search',
+                              ),
                               if (_foundRows.length == 1) ...[
                                 SizedBox(width: 8),
                                 Container(
