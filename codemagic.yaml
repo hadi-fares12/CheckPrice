@@ -1,6 +1,6 @@
 workflows:
   build_ios_unsigned:
-    name: Build iOS (Unsigned)
+    name: Build iOS Unsigned IPA
     max_build_duration: 60
     instance_type: mac_mini_m2
     environment:
@@ -10,12 +10,21 @@ workflows:
       - name: Install dependencies
         script: |
           flutter pub get
-      - name: Build iOS unsigned IPA
+
+      - name: Build iOS app
         script: |
           flutter build ios --release --no-codesign
+
+      - name: Create IPA package
+        script: |
+          cd build/ios/iphoneos
+          mkdir Payload
+          mv Runner.app Payload/
+          zip -r Runner.ipa Payload
+
     artifacts:
-      - build/ios/ipa/*.ipa
-      - build/ios/iphoneos/*.app
+      - build/ios/iphoneos/Runner.ipa
+
     publishing:
       email:
         recipients:
