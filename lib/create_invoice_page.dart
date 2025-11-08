@@ -8,6 +8,40 @@ import 'package:share_plus/share_plus.dart';
 import 'dart:io' as io;
 import 'package:path/path.dart' as path;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:convert';
+
+// Model for saved invoices
+class SavedInvoice {
+  String id;
+  String name;
+  List<Map<String, dynamic>> items;
+  DateTime createdAt;
+  DateTime updatedAt;
+
+  SavedInvoice({
+    required this.id,
+    required this.name,
+    required this.items,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'items': items,
+        'createdAt': createdAt.toIso8601String(),
+        'updatedAt': updatedAt.toIso8601String(),
+      };
+
+  factory SavedInvoice.fromJson(Map<String, dynamic> json) => SavedInvoice(
+        id: json['id'],
+        name: json['name'],
+        items: List<Map<String, dynamic>>.from(json['items']),
+        createdAt: DateTime.parse(json['createdAt']),
+        updatedAt: DateTime.parse(json['updatedAt']),
+      );
+}
 
 class CreateInvoicePage extends StatefulWidget {
   @override
@@ -23,17 +57,21 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
   List<Map<String, dynamic>> _invoiceItems = [];
   bool _invoiceCreated = false;
   bool _multiSelectMode = false;
-  Set<int> _selectedIndices = Set<int>();
-
-  // Column selection for export
+  Set<int> _selectedIndices = Set();
   Set<String> _selectedExportColumns = {};
   List<String> _availableColumns = [];
+
+  // Invoice management
+  List<SavedInvoice> _savedInvoices = [];
+  String? _currentInvoiceId;
+  bool _isEditMode = false;
 
   @override
   void initState() {
     super.initState();
     _invoiceNameController.text = 'Invoice_${DateTime.now().millisecondsSinceEpoch}';
     _loadSavedExportColumns();
+    _loadSavedInvoices();
   }
 
   @override
@@ -42,7 +80,247 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
     _initializeAvailableColumns();
   }
 
-  // Load saved export columns from SharedPreferences
+  // Load saved invoices from SharedPreferences
+  Future<void> _loadSavedInvoices() async {
+    final prefs = await SharedPreferences.getInstance();
+    final invoicesJson = prefs.getStringList('saved_invoices') ?? [];
+
+    setState(() {
+      _savedInvoices = invoicesJson.map((json) => SavedInvoice.fromJson(jsonDecode(json))).toList();
+      _savedInvoices.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    });
+  }
+
+  // Save invoices to SharedPreferences
+  Future<void> _saveSavedInvoices() async {
+    final prefs = await SharedPreferences.getInstance();
+    final invoicesJson = _savedInvoices.map((invoice) => jsonEncode(invoice.toJson())).toList();
+    await prefs.setStringList('saved_invoices', invoicesJson);
+  }
+
+  // Save current invoice
+  Future<void> _saveCurrentInvoice() async {
+    if (_invoiceNameController.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Please enter invoice name'), backgroundColor: Colors.red),
+      );
+      return;
+    }
+
+    if (_invoiceItems.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Cannot save empty invoice'), backgroundColor: Colors.red),
+      );
+      return;
+    }
+
+    final now = DateTime.now();
+
+    if (_isEditMode && _currentInvoiceId != null) {
+      // Update existing invoice
+      final index = _savedInvoices.indexWhere((inv) => inv.id == _currentInvoiceId);
+      if (index != -1) {
+        _savedInvoices[index] = SavedInvoice(
+          id: _currentInvoiceId!,
+          name: _invoiceNameController.text.trim(),
+          items: List<Map<String, dynamic>>.from(_invoiceItems),
+          createdAt: _savedInvoices[index].createdAt,
+          updatedAt: now,
+        );
+      }
+    } else {
+      // Create new invoice
+      final newInvoice = SavedInvoice(
+        id: DateTime.now().millisecondsSinceEpoch.toString(),
+        name: _invoiceNameController.text.trim(),
+        items: List<Map<String, dynamic>>.from(_invoiceItems),
+        createdAt: now,
+        updatedAt: now,
+      );
+      _savedInvoices.insert(0, newInvoice);
+      _currentInvoiceId = newInvoice.id;
+      _isEditMode = true;
+    }
+
+    await _saveSavedInvoices();
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(_isEditMode ? 'Invoice updated!' : 'Invoice saved!'),
+        backgroundColor: Colors.green,
+      ),
+    );
+  }
+
+  // Load an existing invoice
+  void _loadInvoice(SavedInvoice invoice) {
+    setState(() {
+      _currentInvoiceId = invoice.id;
+      _isEditMode = true;
+      _invoiceNameController.text = invoice.name;
+      _invoiceItems = List<Map<String, dynamic>>.from(invoice.items);
+      _invoiceCreated = true;
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Invoice "${invoice.name}" loaded'),
+        backgroundColor: Colors.blue,
+      ),
+    );
+  }
+
+  // Delete a saved invoice
+  Future<void> _deleteInvoice(SavedInvoice invoice) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Delete Invoice'),
+        content: Text('Are you sure you want to delete "${invoice.name}"?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            child: Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      setState(() {
+        _savedInvoices.removeWhere((inv) => inv.id == invoice.id);
+        if (_currentInvoiceId == invoice.id) {
+          _clearInvoice();
+        }
+      });
+      await _saveSavedInvoices();
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Invoice deleted'), backgroundColor: Colors.red),
+      );
+    }
+  }
+
+  // Show saved invoices dialog
+  void _showSavedInvoicesDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(Icons.history, color: Theme.of(context).primaryColor),
+            SizedBox(width: 8),
+            Text('Saved Invoices'),
+          ],
+        ),
+        content: Container(
+          width: double.maxFinite,
+          height: 400,
+          child: _savedInvoices.isEmpty
+              ? Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.inbox, size: 64, color: Colors.grey),
+                      SizedBox(height: 16),
+                      Text('No saved invoices yet'),
+                    ],
+                  ),
+                )
+              : ListView.builder(
+                  itemCount: _savedInvoices.length,
+                  itemBuilder: (context, index) {
+                    final invoice = _savedInvoices[index];
+                    final isCurrentInvoice = invoice.id == _currentInvoiceId;
+
+                    return Card(
+                      margin: EdgeInsets.symmetric(vertical: 4),
+                      color: isCurrentInvoice ? Colors.blue.shade50 : null,
+                      child: ListTile(
+                        leading: CircleAvatar(
+                          backgroundColor: isCurrentInvoice ? Colors.blue : Colors.grey.shade300,
+                          child: Icon(
+                            Icons.receipt,
+                            color: isCurrentInvoice ? Colors.white : Colors.grey.shade700,
+                          ),
+                        ),
+                        title: Text(
+                          invoice.name,
+                          style: TextStyle(
+                            fontWeight: isCurrentInvoice ? FontWeight.bold : FontWeight.normal,
+                          ),
+                        ),
+                        subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('${invoice.items.length} items'),
+                            Text(
+                              'Updated: ${_formatDate(invoice.updatedAt)}',
+                              style: TextStyle(fontSize: 11),
+                            ),
+                          ],
+                        ),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: Icon(Icons.share, color: Colors.green),
+                              onPressed: () {
+                                Navigator.of(context).pop();
+                                _loadInvoice(invoice);
+                                _exportInvoice();
+                              },
+                              tooltip: 'Share',
+                            ),
+                            IconButton(
+                              icon: Icon(Icons.delete, color: Colors.red),
+                              onPressed: () {
+                                Navigator.of(context).pop();
+                                _deleteInvoice(invoice);
+                              },
+                              tooltip: 'Delete',
+                            ),
+                          ],
+                        ),
+                        onTap: () {
+                          Navigator.of(context).pop();
+                          _loadInvoice(invoice);
+                        },
+                      ),
+                    );
+                  },
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _formatDate(DateTime date) {
+    final now = DateTime.now();
+    final diff = now.difference(date);
+
+    if (diff.inDays == 0) {
+      return 'Today ${date.hour}:${date.minute.toString().padLeft(2, '0')}';
+    } else if (diff.inDays == 1) {
+      return 'Yesterday';
+    } else if (diff.inDays < 7) {
+      return '${diff.inDays} days ago';
+    } else {
+      return '${date.day}/${date.month}/${date.year}';
+    }
+  }
+
   void _loadSavedExportColumns() async {
     final prefs = await SharedPreferences.getInstance();
     final savedColumns = prefs.getStringList('export_columns');
@@ -53,7 +331,6 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
     }
   }
 
-  // Save export columns to SharedPreferences
   void _saveExportColumns() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList('export_columns', _selectedExportColumns.toList());
@@ -64,12 +341,10 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
     if (provider.columns.isNotEmpty) {
       setState(() {
         _availableColumns = List.from(provider.columns);
-        // If no columns are saved, select ALL columns by default
         if (_selectedExportColumns.isEmpty) {
           _selectedExportColumns = Set.from(_availableColumns);
-          // Always include quantity
           _selectedExportColumns.add('qty');
-          _saveExportColumns(); // Save the default selection
+          _saveExportColumns();
         }
       });
     }
@@ -124,11 +399,8 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
                     child: ListView.builder(
                       itemCount: _availableColumns.length + 1,
                       itemBuilder: (context, index) {
-                        final column = index < _availableColumns.length 
-                            ? _availableColumns[index] 
-                            : 'qty';
+                        final column = index < _availableColumns.length ? _availableColumns[index] : 'qty';
                         final isQty = column == 'qty';
-                        
                         return Card(
                           margin: EdgeInsets.symmetric(vertical: 2),
                           child: CheckboxListTile(
@@ -173,7 +445,7 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
               ),
               ElevatedButton(
                 onPressed: () {
-                  _saveExportColumns(); // Save the selection
+                  _saveExportColumns();
                   Navigator.of(context).pop();
                   setState(() {});
                 },
@@ -198,8 +470,9 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
     final provider = Provider.of<DataProvider>(context, listen: false);
     final query = _searchController.text.trim();
     if (query.isEmpty) return;
+
     final results = provider.search(query);
-    setState(() { 
+    setState(() {
       _foundRows = results;
       _selectedItem = null;
       _selectedIndices.clear();
@@ -231,6 +504,7 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
         ),
       ),
     );
+
     if (scanned != null) {
       _searchController.text = scanned!;
       _search(context);
@@ -247,7 +521,6 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Show all available data from the item
               ...item.entries.map((entry) {
                 if (entry.value != null && entry.value.toString().isNotEmpty) {
                   return _buildDetailRow(entry.key, entry.value.toString());
@@ -275,7 +548,7 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
             onPressed: () {
               _addSingleItemToInvoice(item);
               Navigator.of(context).pop();
-              _clearSearch(); // Clear search after adding
+              _clearSearch();
             },
             child: Text('Add to Invoice'),
           ),
@@ -314,6 +587,7 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
   void _addSelectedItemsToInvoice() {
     if (_selectedIndices.isEmpty) return;
 
+    int addedCount = _selectedIndices.length;
     for (int index in _selectedIndices) {
       final item = _foundRows[index];
       final quantity = 1;
@@ -324,11 +598,10 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
       _selectedIndices.clear();
       _foundRows.clear();
     });
-
-    _clearSearch(); // Clear search after adding
+    _clearSearch();
 
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('${_selectedIndices.length} items added to invoice')),
+      SnackBar(content: Text('$addedCount items added to invoice')),
     );
   }
 
@@ -344,11 +617,9 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
   void _addItemToInvoiceList(Map<String, dynamic> item, int quantity) {
     if (quantity <= 0) return;
 
-    // Create a copy of the original item with ALL data + quantity
     final invoiceItem = Map<String, dynamic>.from(item);
     invoiceItem['qty'] = quantity;
 
-    // Check if item already exists in invoice by comparing key fields
     final existingIndex = _invoiceItems.indexWhere((existingItem) {
       return _getItemKey(existingItem) == _getItemKey(item);
     });
@@ -364,7 +635,6 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
     }
   }
 
-  // Clear search results and search field
   void _clearSearch() {
     setState(() {
       _foundRows.clear();
@@ -374,11 +644,9 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
   }
 
   String _getItemKey(Map<String, dynamic> item) {
-    // Create a unique key based on important fields
     final code = item['Item Code'] ?? item['item_code'] ?? item['ITEM_CODE'] ?? '';
     final name = item['Item Name'] ?? item['item_name'] ?? item['ITEM_NAME'] ?? '';
     final barcode = item['Barcode'] ?? item['barcode'] ?? item['BARCODE'] ?? '';
-    
     return '$code$name$barcode';
   }
 
@@ -399,7 +667,7 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
     setState(() {
       _invoiceCreated = true;
     });
-    
+
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('Invoice created! You can now add items.'), backgroundColor: Colors.green),
     );
@@ -420,17 +688,18 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
       return;
     }
 
+    // Auto-save before exporting
+    await _saveCurrentInvoice();
+
     try {
       var excel = Excel.createExcel();
       Sheet sheet = excel['Sheet1'];
-      
-      // Use selected columns for headers
+
       List<String> headers = _selectedExportColumns.toList();
       sheet.appendRow(headers);
-      
-      // Write invoice items with selected columns only
+
       for (var item in _invoiceItems) {
-        List<String> row = [];
+        List<dynamic> row = [];
         for (var col in _selectedExportColumns) {
           if (col == 'qty') {
             row.add(item['qty']?.toString() ?? '1');
@@ -440,27 +709,24 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
         }
         sheet.appendRow(row);
       }
-      
-      // Save to temporary file
+
       final tempDir = await getTemporaryDirectory();
       String fileName = '${_invoiceNameController.text.trim()}.xlsx';
       final tempFile = io.File(path.join(tempDir.path, fileName));
-      
       var fileBytes = excel.save();
+
       if (fileBytes != null) {
         await tempFile.writeAsBytes(fileBytes);
-        
         await Share.shareXFiles(
           [XFile(tempFile.path)],
           text: 'Invoice: ${_invoiceNameController.text.trim()}',
           subject: 'Invoice',
         );
-        
+
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Invoice shared successfully!'), backgroundColor: Colors.green),
         );
       }
-      
     } catch (e) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Error sharing invoice: $e'), backgroundColor: Colors.red),
@@ -474,15 +740,17 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
       _invoiceCreated = false;
       _selectedIndices.clear();
       _multiSelectMode = false;
+      _currentInvoiceId = null;
+      _isEditMode = false;
       _invoiceNameController.text = 'Invoice_${DateTime.now().millisecondsSinceEpoch}';
-      _clearSearch(); // Also clear search when clearing invoice
+      _clearSearch();
     });
   }
 
   @override
   Widget build(BuildContext context) {
     final provider = Provider.of<DataProvider>(context);
-    
+
     if (provider.datasetNames.isEmpty) {
       return Scaffold(
         appBar: AppBar(title: Text('Create Invoice')),
@@ -509,9 +777,16 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('Create Invoice'),
+        title: Text(_isEditMode ? 'Edit Invoice' : 'Create Invoice'),
         backgroundColor: Color(0xFF9C27B0),
         elevation: 0,
+        actions: [
+          IconButton(
+            icon: Icon(Icons.history),
+            onPressed: _showSavedInvoicesDialog,
+            tooltip: 'Saved Invoices',
+          ),
+        ],
       ),
       body: Container(
         decoration: BoxDecoration(
@@ -541,6 +816,17 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
                           Icon(Icons.receipt, color: Color(0xFF9C27B0)),
                           SizedBox(width: 8),
                           Text('Invoice Details', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                          if (_isEditMode) ...[
+                            SizedBox(width: 8),
+                            Container(
+                              padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: Colors.blue.shade100,
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Text('EDITING', style: TextStyle(fontSize: 12, color: Colors.blue.shade900)),
+                            ),
+                          ],
                         ],
                       ),
                       SizedBox(height: 16),
@@ -604,7 +890,7 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
                             if (value != null) {
                               provider.selectDataset(value);
                               setState(() {
-                                _clearSearch(); // Clear search when dataset changes
+                                _clearSearch();
                                 _initializeAvailableColumns();
                               });
                             }
@@ -714,10 +1000,9 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
                         children: [
                           Row(
                             children: [
-                              Text('Search Results (${_foundRows.length} found)', 
-                                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                              Text('Search Results (${_foundRows.length} found)',
+                                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                               Spacer(),
-                              // Add a clear search button
                               IconButton(
                                 icon: Icon(Icons.clear, color: Colors.red),
                                 onPressed: _clearSearch,
@@ -749,11 +1034,10 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
                               itemCount: _foundRows.length,
                               itemBuilder: (context, index) {
                                 final item = _foundRows[index];
-                                
                                 return Card(
                                   margin: EdgeInsets.symmetric(vertical: 4),
                                   child: ListTile(
-                                    leading: _multiSelectMode 
+                                    leading: _multiSelectMode
                                         ? Checkbox(
                                             value: _selectedIndices.contains(index),
                                             onChanged: (value) => _toggleItemSelection(index),
@@ -774,10 +1058,8 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
                                       _getItemSubtitle(item),
                                       overflow: TextOverflow.ellipsis,
                                     ),
-                                    trailing: _multiSelectMode 
-                                        ? null 
-                                        : Icon(Icons.chevron_right, color: Colors.blue),
-                                    onTap: _multiSelectMode 
+                                    trailing: _multiSelectMode ? null : Icon(Icons.chevron_right, color: Colors.blue),
+                                    onTap: _multiSelectMode
                                         ? () => _toggleItemSelection(index)
                                         : () => _showItemDetailsDialog(context, item),
                                   ),
@@ -802,8 +1084,8 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
                         children: [
                           Row(
                             children: [
-                              Text('Invoice Items (${_invoiceItems.length})', 
-                                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                              Text('Invoice Items (${_invoiceItems.length})',
+                                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                               Spacer(),
                               Icon(Icons.shopping_cart, color: Colors.green),
                             ],
@@ -812,14 +1094,13 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
                           ..._invoiceItems.asMap().entries.map((entry) {
                             int index = entry.key;
                             final item = entry.value;
-                            
                             return Card(
                               margin: EdgeInsets.symmetric(vertical: 4),
                               child: ListTile(
                                 leading: CircleAvatar(
                                   backgroundColor: Colors.green.withOpacity(0.1),
-                                  child: Text('${item['qty']}', 
-                                    style: TextStyle(fontWeight: FontWeight.bold, color: Colors.green)),
+                                  child: Text('${item['qty']}',
+                                      style: TextStyle(fontWeight: FontWeight.bold, color: Colors.green)),
                                 ),
                                 title: Text(_getItemDisplayText(item)),
                                 subtitle: Text('Quantity: ${item['qty']}'),
@@ -869,6 +1150,33 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
                             ),
                           ),
                           SizedBox(height: 16),
+
+                          // Save Invoice Button
+                          Container(
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(12),
+                              gradient: LinearGradient(colors: [Colors.orange, Colors.orange.withOpacity(0.8)]),
+                            ),
+                            child: SizedBox(
+                              width: double.infinity,
+                              height: 56,
+                              child: ElevatedButton.icon(
+                                icon: Icon(Icons.save, color: Colors.white),
+                                label: Text(
+                                  _isEditMode ? 'Update Invoice' : 'Save Invoice',
+                                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                                ),
+                                onPressed: _invoiceItems.isNotEmpty ? _saveCurrentInvoice : null,
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.transparent,
+                                  shadowColor: Colors.transparent,
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                ),
+                              ),
+                            ),
+                          ),
+                          SizedBox(height: 16),
+
                           Row(
                             children: [
                               Expanded(
@@ -914,7 +1222,6 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
   String _getItemDisplayText(Map<String, dynamic> item) {
     final code = item['Item Code'] ?? item['item_code'] ?? item['ITEM_CODE'] ?? '';
     final name = item['Item Name'] ?? item['item_name'] ?? item['ITEM_NAME'] ?? '';
-    
     if (code.isNotEmpty && name.isNotEmpty) {
       return '$code - $name';
     } else if (code.isNotEmpty) {
@@ -930,11 +1237,9 @@ class _CreateInvoicePageState extends State<CreateInvoicePage> {
   String _getItemSubtitle(Map<String, dynamic> item) {
     final barcode = item['Barcode'] ?? item['barcode'] ?? '';
     final price = item['Price'] ?? item['price'] ?? '';
-    
     List<String> info = [];
     if (barcode.isNotEmpty) info.add('Barcode: $barcode');
     if (price.isNotEmpty) info.add('Price: $price');
-    
     return info.isNotEmpty ? info.join(' | ') : 'Tap for details';
   }
 }
