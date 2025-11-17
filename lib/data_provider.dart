@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:hive/hive.dart';
 import 'models.dart';
+import 'package:http/http.dart' as http;
+import 'dart:io';
+import 'package:excel/excel.dart';
 
 class DataProvider extends ChangeNotifier {
   static const String boxName = 'excelDataBox';
@@ -8,6 +11,7 @@ class DataProvider extends ChangeNotifier {
   ExcelData? _excelData;
   String? _selectedName;
   bool _isInitialized = false;
+  bool _initializationInProgress = false;
 
   List<ExcelData> get allDatasets => _box?.values.toList() ?? [];
   List<String> get datasetNames => allDatasets.map((e) => e.name).toList();
@@ -22,96 +26,161 @@ class DataProvider extends ChangeNotifier {
   }
 
   Future<void> _init() async {
+    if (_initializationInProgress) return;
+    
+    _initializationInProgress = true;
     try {
+      print('Initializing DataProvider...');
+      
       // Ensure the adapter is registered
       if (!Hive.isAdapterRegistered(1)) {
         Hive.registerAdapter(ExcelDataAdapter());
         print('ExcelDataAdapter registered in DataProvider');
       }
       
-      // Hive is already initialized in main.dart, just open the box
-      _box = await Hive.openBox<ExcelData>(boxName);
-      if (_box!.isNotEmpty) {
-        _excelData = _box!.getAt(0);
-        _selectedName = _excelData!.name;
+      // Open the Hive box with better error handling
+      try {
+        _box = await Hive.openBox<ExcelData>(boxName);
+        print('Hive box opened successfully');
+      } catch (e) {
+        print('Error opening Hive box: $e');
+        
+        // FIXED: Better error handling for corrupted data
+        if (e.toString().contains('type') && e.toString().contains('subtype')) {
+          print('Detected schema mismatch. Clearing corrupted data...');
+          
+          try {
+            // Close any open boxes first
+            if (Hive.isBoxOpen(boxName)) {
+              await Hive.box<ExcelData>(boxName).close();
+            }
+            
+            // Delete the corrupted box
+            await Hive.deleteBoxFromDisk(boxName);
+            print('Deleted corrupted box');
+            
+            // Create a fresh box
+            _box = await Hive.openBox<ExcelData>(boxName);
+            print('Created fresh box after data corruption');
+          } catch (deleteError) {
+            print('Error during box recreation: $deleteError');
+            
+            // Last resort: try to manually delete the file
+            try {
+              final boxPath = '${Directory.current.path}/exceldatabox.hive';
+              final file = File(boxPath);
+              if (await file.exists()) {
+                // Try to force unlock by waiting
+                await Future.delayed(Duration(milliseconds: 500));
+                await file.delete();
+                print('Manually deleted box file');
+              }
+              
+              _box = await Hive.openBox<ExcelData>(boxName);
+              print('Box recreated after manual deletion');
+            } catch (manualError) {
+              print('Manual deletion failed: $manualError');
+              throw Exception('Failed to initialize storage. Please restart the application.');
+            }
+          }
+        } else {
+          throw Exception('Failed to initialize storage: $e');
+        }
       }
+      
+      // Load existing data if available
+      if (_box != null && _box!.isNotEmpty) {
+        try {
+          _excelData = _box!.values.first;
+          _selectedName = _excelData!.name;
+          print('Loaded existing dataset: ${_excelData!.name}');
+        } catch (loadError) {
+          print('Error loading existing data: $loadError');
+          // Clear corrupted data
+          await _box!.clear();
+          print('Cleared corrupted existing data');
+        }
+      }
+      
       _isInitialized = true;
       notifyListeners();
       print('DataProvider initialized successfully');
     } catch (e) {
-      print('Error opening Hive box: $e');
-      _isInitialized = true; // Mark as initialized even if failed
+      print('Error initializing DataProvider: $e');
+      _isInitialized = true; // Mark as initialized to prevent blocking
       notifyListeners();
+      rethrow;
+    } finally {
+      _initializationInProgress = false;
     }
   }
 
   Future<void> _ensureInitialized() async {
-    if (!_isInitialized) {
-      await _init();
-    }
-    // Wait a bit more if still not initialized
+    if (_isInitialized && _box != null) return;
+    
+    // Wait for initialization to complete
     int attempts = 0;
-    while (!_isInitialized && attempts < 10) {
+    while (!_isInitialized && attempts < 50) {
       await Future.delayed(Duration(milliseconds: 100));
       attempts++;
     }
+    
+    if (!_isInitialized) {
+      throw Exception('DataProvider initialization timeout');
+    }
+    
+    if (_box == null) {
+      throw Exception('Storage not available');
+    }
   }
 
-  Future<void> importExcelData(String name, List<String> columns, List<Map<String, dynamic>> rows) async {
+  Future<void> importExcelData(
+    String name, 
+    List<String> columns, 
+    List<Map<String, dynamic>> rows, 
+    {String? importPath, bool autoRefresh = false}
+  ) async {
     try {
-      // Ensure storage is initialized
+      print('Starting import for dataset: $name');
+      
       await _ensureInitialized();
 
-      // Validate only the name
-      if (name == null || name.isEmpty) {
+      if (name.trim().isEmpty) {
         throw Exception('Dataset name cannot be empty');
       }
 
-      // Accept any columns (even empty)
       List<String> validColumns = [];
-      if (columns != null && columns.isNotEmpty) {
+      if (columns.isNotEmpty) {
         for (int i = 0; i < columns.length; i++) {
-          String? col = columns[i];
-          if (col == null || col.isEmpty) {
+          String col = columns[i];
+          if (col.isEmpty) {
             col = 'Column ${i + 1}';
           }
           validColumns.add(col.trim());
         }
       } else {
-        // If no columns provided, create a default one
         validColumns = ['Column 1'];
       }
 
-      // Accept any rows (even empty)
       List<Map<String, dynamic>> validRows = [];
-      if (rows != null && rows.isNotEmpty) {
+      if (rows.isNotEmpty) {
         for (var row in rows) {
-          if (row == null) {
-            // Create empty row if null
-            Map<String, dynamic> emptyRow = {};
-            for (String col in validColumns) {
-              emptyRow[col] = '';
-            }
-            validRows.add(emptyRow);
-          } else {
-            Map<String, dynamic> validRow = {};
-            for (String col in validColumns) {
+          Map<String, dynamic> validRow = {};
+          for (String col in validColumns) {
+            try {
               dynamic value = row[col];
               if (value == null) {
                 validRow[col] = '';
               } else {
-                try {
-                  validRow[col] = value.toString();
-                } catch (e) {
-                  validRow[col] = '';
-                }
+                validRow[col] = value.toString();
               }
+            } catch (e) {
+              validRow[col] = '';
             }
-            validRows.add(validRow);
           }
+          validRows.add(validRow);
         }
       } else {
-        // If no rows provided, create one empty row
         Map<String, dynamic> emptyRow = {};
         for (String col in validColumns) {
           emptyRow[col] = '';
@@ -119,31 +188,37 @@ class DataProvider extends ChangeNotifier {
         validRows.add(emptyRow);
       }
 
-      // Ensure we have at least one row
-      if (validRows.isEmpty) {
-        Map<String, dynamic> emptyRow = {};
-        for (String col in validColumns) {
-          emptyRow[col] = '';
-        }
-        validRows.add(emptyRow);
-      }
-
-      final newData = ExcelData(name: name, columns: validColumns, rows: validRows);
+      final existingIndex = allDatasets.indexWhere((d) => d.name == name);
       
-      // Try to initialize box if not available
-      if (_box == null) {
-        await _init();
-      }
-      
-      if (_box != null) {
+      ExcelData newData;
+      if (existingIndex != -1) {
+        newData = allDatasets[existingIndex];
+        newData.columns = validColumns;
+        newData.rows = validRows;
+        newData.importPath = importPath;
+        newData.autoRefresh = autoRefresh;
+        await newData.save();
+        print('Updated existing dataset: $name');
+      } else {
+        newData = ExcelData(
+          name: name, 
+          columns: validColumns, 
+          rows: validRows,
+          importPath: importPath,
+          autoRefresh: autoRefresh,
+        );
+        
         await _box!.add(newData);
-        _excelData = newData;
-        _selectedName = name;
-        notifyListeners();
-      } else {
-        throw Exception('Storage not initialized');
+        print('Created new dataset: $name');
       }
+
+      _excelData = newData;
+      _selectedName = name;
+      notifyListeners();
+      
+      print('Import completed successfully for dataset: $name');
     } catch (e) {
+      print('Error in importExcelData: $e');
       throw Exception('Import failed: ${e.toString()}');
     }
   }
@@ -157,55 +232,69 @@ class DataProvider extends ChangeNotifier {
     }
   }
 
+  Future<void> deleteDataset(String name) async {
+    try {
+      await _ensureInitialized();
+      final found = allDatasets.firstWhereOrNull((d) => d.name == name);
+      if (found != null) {
+        await found.delete();
+        if (_selectedName == name) {
+          if (_box!.isNotEmpty) {
+            _excelData = _box!.values.first;
+            _selectedName = _excelData!.name;
+          } else {
+            _excelData = null;
+            _selectedName = null;
+          }
+        }
+        notifyListeners();
+      }
+    } catch (e) {
+      throw Exception('Failed to delete dataset: ${e.toString()}');
+    }
+  }
+
   Future<void> copyDataset(String fromName, String newName) async {
-    await _ensureInitialized();
-    final found = allDatasets.firstWhereOrNull((d) => d.name == fromName);
-    if (found != null) {
-      final copy = ExcelData(
-        name: newName,
-        columns: List<String>.from(found.columns),
-        rows: List<Map<String, dynamic>>.from(found.rows.map((row) => Map<String, dynamic>.from(row))),
-        isCopy: true,
-        originalDatasetName: fromName,
-        originalRows: List<Map<String, dynamic>>.from(found.rows.map((row) => Map<String, dynamic>.from(row))),
-        updatedRowIndices: [],
-        newRowIndices: [],
-      );
-      await _box!.add(copy);
-      _excelData = copy;
-      _selectedName = newName;
-      notifyListeners();
+    try {
+      await _ensureInitialized();
+      final found = allDatasets.firstWhereOrNull((d) => d.name == fromName);
+      if (found != null) {
+        final copy = ExcelData(
+          name: newName,
+          columns: List<String>.from(found.columns),
+          rows: List<Map<String, dynamic>>.from(found.rows.map((row) => Map<String, dynamic>.from(row))),
+          isCopy: true,
+          originalDatasetName: fromName,
+          originalRows: List<Map<String, dynamic>>.from(found.rows.map((row) => Map<String, dynamic>.from(row))),
+          updatedRowIndices: [],
+          newRowIndices: [],
+          importPath: found.importPath,
+          autoRefresh: found.autoRefresh,
+        );
+        await _box!.add(copy);
+        _excelData = copy;
+        _selectedName = newName;
+        notifyListeners();
+      }
+    } catch (e) {
+      throw Exception('Failed to copy dataset: ${e.toString()}');
     }
   }
 
   Future<void> renameDataset(String oldName, String newName) async {
-    await _ensureInitialized();
-    final found = allDatasets.firstWhereOrNull((d) => d.name == oldName);
-    if (found != null) {
-      found.name = newName;
-      await found.save();
-      if (_selectedName == oldName) {
-        _selectedName = newName;
-      }
-      notifyListeners();
-    }
-  }
-
-  Future<void> deleteDataset(String name) async {
-    await _ensureInitialized();
-    final found = allDatasets.firstWhereOrNull((d) => d.name == name);
-    if (found != null) {
-      await found.delete();
-      if (_selectedName == name) {
-        if (_box!.isNotEmpty) {
-          _excelData = _box!.getAt(0);
-          _selectedName = _excelData!.name;
-        } else {
-          _excelData = null;
-          _selectedName = null;
+    try {
+      await _ensureInitialized();
+      final found = allDatasets.firstWhereOrNull((d) => d.name == oldName);
+      if (found != null) {
+        found.name = newName;
+        await found.save();
+        if (_selectedName == oldName) {
+          _selectedName = newName;
         }
+        notifyListeners();
       }
-      notifyListeners();
+    } catch (e) {
+      throw Exception('Failed to rename dataset: ${e.toString()}');
     }
   }
 
@@ -214,7 +303,6 @@ class DataProvider extends ChangeNotifier {
     if (_excelData != null) {
       _excelData!.rows.add(row);
       
-      // Mark as new row if this is a copy
       if (_excelData!.isCopy) {
         _excelData!.markRowAsNew(_excelData!.rows.length - 1);
       }
@@ -229,7 +317,6 @@ class DataProvider extends ChangeNotifier {
     if (_excelData != null && index >= 0 && index < _excelData!.rows.length) {
       _excelData!.rows[index] = row;
       
-      // Mark as updated row if this is a copy
       if (_excelData!.isCopy) {
         _excelData!.markRowAsUpdated(index);
       }
@@ -244,12 +331,10 @@ class DataProvider extends ChangeNotifier {
     if (_excelData != null && index >= 0 && index < _excelData!.rows.length) {
       _excelData!.rows.removeAt(index);
       
-      // Update indices after deletion
       if (_excelData!.isCopy) {
         _excelData!.updatedRowIndices.removeWhere((i) => i == index);
         _excelData!.newRowIndices.removeWhere((i) => i == index);
         
-        // Adjust indices for rows after the deleted row
         _excelData!.updatedRowIndices = _excelData!.updatedRowIndices
             .where((i) => i != index)
             .map((i) => i > index ? i - 1 : i)
@@ -298,7 +383,6 @@ class DataProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  // Get changed rows for export (only for copied datasets)
   List<Map<String, dynamic>> get changedRows {
     if (_excelData != null && _excelData!.isCopy) {
       return _excelData!.changedRows;
@@ -306,12 +390,10 @@ class DataProvider extends ChangeNotifier {
     return [];
   }
 
-  // Check if current dataset is a copy
   bool get isCurrentDatasetCopy {
     return _excelData?.isCopy ?? false;
   }
 
-  // Get row status for display
   String getRowStatus(int rowIndex) {
     if (_excelData != null && _excelData!.isCopy) {
       return _excelData!.getRowStatus(rowIndex);
@@ -319,7 +401,6 @@ class DataProvider extends ChangeNotifier {
     return 'Original';
   }
 
-  // Check if a row is changed
   bool isRowChanged(int rowIndex) {
     if (_excelData != null && _excelData!.isCopy) {
       return _excelData!.isRowChanged(rowIndex);
@@ -327,7 +408,6 @@ class DataProvider extends ChangeNotifier {
     return false;
   }
 
-  // Get change statistics
   Map<String, int> get changeStats {
     if (_excelData != null && _excelData!.isCopy) {
       return {
@@ -347,9 +427,12 @@ class DataProvider extends ChangeNotifier {
     };
   }
 
-  // Get original dataset name for copied datasets
   String? get originalDatasetName {
     return _excelData?.originalDatasetName;
+  }
+
+  List<ExcelData> get refreshableDatasets {
+    return allDatasets.where((dataset) => dataset.canRefresh).toList();
   }
 }
 
@@ -360,4 +443,4 @@ extension FirstWhereOrNullExtension<E> on List<E> {
     }
     return null;
   }
-} 
+}

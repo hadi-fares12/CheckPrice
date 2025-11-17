@@ -5,8 +5,10 @@ part 'models.g.dart';
 class ExcelData extends HiveObject {
   @HiveField(0)
   late String name;
+  
   @HiveField(1)
   late List<String> columns;
+  
   @HiveField(2)
   late List<Map<String, dynamic>> rows;
 
@@ -25,6 +27,14 @@ class ExcelData extends HiveObject {
   @HiveField(7)
   late List<int> newRowIndices;
 
+  // Add new field for import path
+  @HiveField(8)
+  late String? importPath;
+
+  // Add new field for auto-refresh
+  @HiveField(9)
+  late bool autoRefresh;
+
   ExcelData({
     required this.name, 
     required this.columns, 
@@ -34,6 +44,8 @@ class ExcelData extends HiveObject {
     List<Map<String, dynamic>>? originalRows,
     List<int>? updatedRowIndices,
     List<int>? newRowIndices,
+    this.importPath, // Add import path parameter
+    this.autoRefresh = false, // Add auto-refresh parameter
   }) : 
     originalRows = originalRows ?? [],
     updatedRowIndices = updatedRowIndices ?? [],
@@ -91,4 +103,7 @@ class ExcelData extends HiveObject {
       return 'Original';
     }
   }
-} 
+
+  // Method to check if this dataset can be refreshed
+  bool get canRefresh => importPath != null && importPath!.isNotEmpty;
+}

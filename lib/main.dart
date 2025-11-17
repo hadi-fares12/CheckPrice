@@ -42,7 +42,7 @@ class MyApp extends StatelessWidget {
     return ChangeNotifierProvider(
       create: (_) => DataProvider(),
       child: MaterialApp(
-        title: 'Check Price App',
+        title: 'CheckPrice',
         theme: ThemeData(
           primaryColor: Color(0xFF1976D2),
           colorScheme: ColorScheme.fromSwatch().copyWith(
@@ -61,13 +61,13 @@ class MyApp extends StatelessWidget {
               padding: EdgeInsets.symmetric(vertical: 16, horizontal: 24),
             ),
           ),
-          cardTheme: CardThemeData(
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16),
-            ),
-            elevation: 6,
-            margin: EdgeInsets.all(8),
+         cardTheme: CardThemeData(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
           ),
+          elevation: 6,
+          margin: EdgeInsets.all(8),
+        ),
         ),
         home: isLoggedIn ? HomePage() : LoginPage(),
       ),

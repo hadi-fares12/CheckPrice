@@ -22,20 +22,22 @@ class ExcelDataAdapter extends TypeAdapter<ExcelData> {
       rows: (fields[2] as List)
           .map((dynamic e) => (e as Map).cast<String, dynamic>())
           .toList(),
-      isCopy: fields[3] as bool,
+      isCopy: fields[3] as bool? ?? false, // FIXED: Added null safety
       originalDatasetName: fields[4] as String?,
       originalRows: (fields[5] as List?)
           ?.map((dynamic e) => (e as Map).cast<String, dynamic>())
-          ?.toList(),
+          .toList(),
       updatedRowIndices: (fields[6] as List?)?.cast<int>(),
       newRowIndices: (fields[7] as List?)?.cast<int>(),
+      importPath: fields[8] as String?,
+      autoRefresh: fields[9] as bool? ?? false, // FIXED: Added null safety with default value
     );
   }
 
   @override
   void write(BinaryWriter writer, ExcelData obj) {
     writer
-      ..writeByte(8)
+      ..writeByte(10)
       ..writeByte(0)
       ..write(obj.name)
       ..writeByte(1)
@@ -51,7 +53,11 @@ class ExcelDataAdapter extends TypeAdapter<ExcelData> {
       ..writeByte(6)
       ..write(obj.updatedRowIndices)
       ..writeByte(7)
-      ..write(obj.newRowIndices);
+      ..write(obj.newRowIndices)
+      ..writeByte(8)
+      ..write(obj.importPath)
+      ..writeByte(9)
+      ..write(obj.autoRefresh);
   }
 
   @override
