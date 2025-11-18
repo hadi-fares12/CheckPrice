@@ -1,29 +1,41 @@
 workflows:
-  build_ios_unsigned:
-    name: Build iOS Unsigned IPA
+  build_ios_signed:
+    name: Build iOS Signed IPA
     max_build_duration: 60
     instance_type: mac_mini_m2
     environment:
       flutter: stable
       xcode: latest
+
+    # Automatically apply provisioning profile and certificate
+    integrations:
+      app_store_connect: default
+
     scripts:
       - name: Install dependencies
         script: |
           flutter pub get
 
-      - name: Build iOS app
+      - name: Build iOS release
         script: |
           flutter build ios --release --no-codesign
 
-      - name: Create IPA package
+      - name: Code sign and create IPA
         script: |
-          cd build/ios/iphoneos
-          mkdir Payload
-          mv Runner.app Payload/
-          zip -r Runner.ipa Payload
+          xcode-project use-profiles
+          xcodebuild -workspace ios/Runner.xcworkspace \
+          -scheme Runner \
+          -configuration Release \
+          -archivePath build/ios/archive/Runner.xcarchive archive \
+          CODE_SIGN_STYLE=Manual
+          
+          xcodebuild -exportArchive \
+          -archivePath build/ios/archive/Runner.xcarchive \
+          -exportPath build/ios/ipa \
+          -exportOptionsPlist exportOptions.plist
 
     artifacts:
-      - build/ios/iphoneos/Runner.ipa
+      - build/ios/ipa/*.ipa
 
     publishing:
       email:
